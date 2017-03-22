@@ -32,6 +32,7 @@ import org.cloudfoundry.identity.uaa.util.TimeServiceImpl;
 import org.cloudfoundry.identity.uaa.zone.IdentityZoneHolder;
 import org.junit.After;
 import org.junit.Before;
+import org.junit.Ignore;
 import org.junit.Test;
 import org.springframework.jdbc.core.BatchPreparedStatementSetter;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -41,6 +42,7 @@ import org.springframework.security.oauth2.provider.client.InMemoryClientDetails
 import java.lang.reflect.Method;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
+import java.sql.Timestamp;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Date;
@@ -53,6 +55,7 @@ import static org.cloudfoundry.identity.uaa.approval.Approval.ApprovalStatus.APP
 import static org.cloudfoundry.identity.uaa.approval.Approval.ApprovalStatus.DENIED;
 import static org.cloudfoundry.identity.uaa.test.UaaTestAccounts.INSERT_BARE_BONE_USER;
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.lessThan;
 import static org.hamcrest.core.Is.is;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
@@ -333,8 +336,47 @@ public class ApprovalsAdminEndpointsTests extends JdbcTestBase {
     }
 
     @Test
+    @Ignore("Running locally only, to determine if the solution was feasible.")
     public void performance_is_acceptable() throws Exception {
-        doWithTiming("addUsers", 10000);
+        int max = 200000;
+        rebuildIndices();
+        int delta = 100;
+        for (int i = 0; i<delta; i++) {
+            int count = (max / delta);
+            int start = i*count;
+            doWithTiming("addUsers", start, count);
+            doWithTiming("addApprovals", start, start+count, 5);
+        }
+
+        assertThat(doWithTiming("getApprovalsCount", "user_id eq \"user-1000\""), lessThan(5d) );
+        assertThat(doWithTiming("revokeApprovalsCount", "user_id eq \"user-1000\""), lessThan(5d) );
+        assertThat(doWithTiming("revokeApprovalsCount", "client_id eq \"c1\""), lessThan(5d) );
+    }
+
+    public void revokeApprovalsCount(String filter) {
+        assertTrue(dao.revokeApprovals(filter));
+    }
+
+    public int getApprovalsCount(String filter) {
+        return dao.getApprovals(filter).size();
+    }
+
+    public void rebuildIndices() {
+        sqlNoError("OPTIMIZE TABLE users");
+        sqlNoError("OPTIMIZE TABLE authz_approvals");
+        sqlNoError("REINDEX TABLE users");
+        sqlNoError("REINDEX TABLE authz_approvals");
+        sqlNoError("DBCC DBREINDEX ('users')");
+        sqlNoError("DBCC DBREINDEX ('authz_approvals')");
+    }
+
+    public void sqlNoError(String sql) {
+        try {
+            jdbcTemplate.update(sql);
+            System.err.println("Succeeded: "+sql);
+        } catch (Exception e) {
+            System.err.println("Failed: "+sql);
+        }
     }
 
 
@@ -350,11 +392,11 @@ public class ApprovalsAdminEndpointsTests extends JdbcTestBase {
 
 
 
-    public void addUsers(final Integer size) throws Exception {
+    public void addUsers(final Integer startIndex, final Integer size) throws Exception {
         jdbcTemplate.batchUpdate(INSERT_BARE_BONE_USER, new BatchPreparedStatementSetter() {
             @Override
             public void setValues(PreparedStatement ps, int i) throws SQLException {
-                String userId = "user-"+i;
+                String userId = "user-"+(i+startIndex);
                 int pos = 1;
                 ps.setString(pos++, userId);
                 ps.setString(pos++, userId);
@@ -371,19 +413,19 @@ public class ApprovalsAdminEndpointsTests extends JdbcTestBase {
     }
 
 
-    public void addApprovals(final int minUserId, final int maxUserId, final int countPerUser) throws Exception {
-        jdbcTemplate.batchUpdate("insert into authz_approval (user_id, client_id, scope) values (?,?,?)", new BatchPreparedStatementSetter() {
+    public void addApprovals(final Integer minUserId, final Integer maxUserId, final Integer countPerUser) throws Exception {
+        jdbcTemplate.batchUpdate("insert into authz_approvals (user_id, client_id, scope, expiresat, status, lastmodifiedat) values (?,?,?,?,?,?)", new BatchPreparedStatementSetter() {
             @Override
             public void setValues(PreparedStatement ps, int i) throws SQLException {
-                int index = i / countPerUser;
-                String userId = "user-"+(i+index);
+                int index = (i+minUserId) / countPerUser;
+                String userId = "user-"+(minUserId+index);
                 int pos = 1;
                 ps.setString(pos++, userId);
-                ps.setString(pos++, userId);
-                ps.setString(pos++, userId);
-                ps.setString(pos++, userId);
-                ps.setString(pos++, userId + "@test.com");
-                ps.setString(pos++, IdentityZoneHolder.get().getId());
+                ps.setString(pos++, "c1");
+                ps.setString(pos++, "uaa.user."+i);
+                ps.setTimestamp(pos++, new Timestamp(System.currentTimeMillis()+300000));
+                ps.setString(pos++, "APPROVED");
+                ps.setTimestamp(pos++, new Timestamp(System.currentTimeMillis()));
             }
 
             @Override
