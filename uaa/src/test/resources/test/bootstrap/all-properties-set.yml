@@ -308,6 +308,9 @@ oauth:
   client:
     encoder_cache: false
     encoder_expiry: 600
+    delete:
+      - delete-this-client-1
+      - delete-this-client-2
   clients:
     cc-service-dashboards:
       authorities: clients.read,clients.write,clients.admin
@@ -392,6 +395,9 @@ scim:
     pony: The magic of friendship
   userids_enabled: true
   user:
+    delete:
+      - remove-username-1
+      - remove-username-2
     override: true
   users:
   - admin|admin|admin|||foo.bar,uaa.admin|uaa

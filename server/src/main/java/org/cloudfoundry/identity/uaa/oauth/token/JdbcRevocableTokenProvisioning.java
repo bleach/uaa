@@ -147,6 +147,11 @@ public class JdbcRevocableTokenProvisioning implements RevocableTokenProvisionin
     }
 
     @Override
+    public int deleteByClient(String clientId, String zoneId) {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
     public Log getLogger() {
         return logger;
     }

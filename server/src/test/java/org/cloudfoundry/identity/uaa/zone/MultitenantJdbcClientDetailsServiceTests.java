@@ -1,6 +1,7 @@
 package org.cloudfoundry.identity.uaa.zone;
 
 import org.cloudfoundry.identity.uaa.audit.event.EntityDeletedEvent;
+import org.cloudfoundry.identity.uaa.authentication.UaaAuthentication;
 import org.cloudfoundry.identity.uaa.authentication.UaaAuthenticationTestFactory;
 import org.cloudfoundry.identity.uaa.constants.OriginKeys;
 import org.cloudfoundry.identity.uaa.oauth.UaaOauth2Authentication;
@@ -36,11 +37,13 @@ import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 
 import static org.cloudfoundry.identity.uaa.oauth.client.ClientConstants.REQUIRED_USER_GROUPS;
 import static org.cloudfoundry.identity.uaa.oauth.client.ClientDetailsModification.SECRET;
+import static org.cloudfoundry.identity.uaa.zone.IdentityZoneHolder.isUaa;
 import static org.hamcrest.CoreMatchers.containsString;
 import static org.hamcrest.CoreMatchers.is;
 import static org.hamcrest.Matchers.containsInAnyOrder;
@@ -51,8 +54,12 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.Matchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 
@@ -123,6 +130,67 @@ public class MultitenantJdbcClientDetailsServiceTests {
     }
 
     @Test
+    public void event_calls_delete_method() throws Exception {
+        ClientDetails client = addClientToDb(generate.generate());
+        service.onApplicationEvent(new EntityDeletedEvent<>(client, mock(UaaAuthentication.class)));
+        verify(service, times(1)).deleteByClient(eq(client.getClientId()), eq(IdentityZoneHolder.get().getId()));
+    }
+
+    @Test
+    public void delete_by_client_id() throws Exception {
+        //this test ensures that one method calls the other, rather than having its own implementation
+        for (IdentityZone zone : Arrays.asList(IdentityZone.getUaa(), otherIdentityZone)) {
+            IdentityZoneHolder.set(zone);
+            try {
+                service.removeClientDetails("some-client-id");
+            } catch (Exception e) {
+            }
+            verify(service, times(1)).deleteByClient(eq("some-client-id"), eq(zone.getId()));
+            reset(service);
+        }
+    }
+
+    @Test
+    public void delete_by_client_id_and_zone() throws Exception {
+        List<ClientDetails> defaultZoneClients = new LinkedList<>();
+        addClientsInCurrentZone(defaultZoneClients, 5);
+        for (IdentityZone zone : Arrays.asList(IdentityZone.getUaa(), otherIdentityZone)) {
+            IdentityZoneHolder.set(zone);
+            List<ClientDetails> clients = new LinkedList<>();
+            addClientsInCurrentZone(clients, 10, true);
+            assertEquals((isUaa() ? 5 : 0) + clients.size(), countClientsInZone(zone.getId()));
+            clients.stream().forEach(client -> {
+                assertEquals(1, countClientApprovals(client.getClientId(), zone.getId()));
+            });
+
+
+            clients.removeIf(
+                client -> {
+                    assertEquals("We deleted exactly one row", 1, service.deleteByClient(client.getClientId(), zone.getId()));
+                    assertEquals("Our client count decreased by 1", (isUaa() ? 5 : 0) + (clients.size()-1), countClientsInZone(zone.getId()));
+                    assertEquals("Approvals "+client.getClientId()+" for client were deleted.", 0, countClientApprovals(client.getClientId(), zone.getId()));
+                    assertFalse("Client "+client.getClientId()+ " was deleted.", clientExists(client.getClientId(), zone.getId()));
+                    return true;
+                });
+
+            assertEquals(0, clients.size());
+            assertEquals(isUaa() ? 5 : 0, countClientsInZone(zone.getId()));
+        }
+    }
+
+    public void addClientsInCurrentZone(List<ClientDetails> clients, int count) {
+        addClientsInCurrentZone(clients, count, false);
+    }
+    public void addClientsInCurrentZone(List<ClientDetails> clients, int count, boolean addapproval) {
+        for (int i = 0; i < count; i++) {
+            clients.add(addClientToDb(i + "-" + generate.generate()));
+        }
+        if (addapproval) {
+            clients.stream().forEach(c -> addApproval(c.getClientId()));
+        }
+    }
+
+    @Test
     public void test_can_delete_zone_clients() throws Exception {
         String id = generate.generate();
         for (IdentityZone zone : Arrays.asList(IdentityZone.getUaa(), otherIdentityZone)) {
@@ -130,16 +198,16 @@ public class MultitenantJdbcClientDetailsServiceTests {
             addClientToDb(id);
             assertThat(countClientsInZone(IdentityZoneHolder.get().getId()), is(1));
             addApproval(id);
-
+            assertThat(countClientApprovals(id, zone.getId()), is(1));
         }
-        assertThat(countClientApprovals(id), is(2));
+
         service.onApplicationEvent(new EntityDeletedEvent<>(otherIdentityZone, null));
         assertThat(countClientsInZone(otherIdentityZone.getId()), is(0));
-        assertThat(countClientApprovals(id), is(1));
+        assertThat(countClientApprovals(id, otherIdentityZone.getId()), is(0));
     }
 
-    public int countClientApprovals(String clientId) {
-        return jdbcTemplate.queryForObject("select count(*) from authz_approvals where client_id=?", new Object[] {clientId}, Integer.class);
+    public int countClientApprovals(String clientId, String zoneId) {
+        return jdbcTemplate.queryForObject("select count(*) from authz_approvals where client_id=? and user_id in (select id from users where identity_zone_id = ?)", new Object[] {clientId, zoneId}, Integer.class);
     }
 
     public int countClientsInZone(String zoneId) {
@@ -154,13 +222,14 @@ public class MultitenantJdbcClientDetailsServiceTests {
     public void test_cannot_delete_uaa_zone_clients() throws Exception {
         String id = generate.generate();
         addClientToDb(id);
-        assertThat(countClientsInZone(IdentityZoneHolder.get().getId()), is(1));
+        String zoneId = IdentityZoneHolder.get().getId();
+        assertThat(countClientsInZone(zoneId), is(1));
         addApproval(id);
-        assertThat(countClientApprovals(id), is(1));
+        assertThat(countClientApprovals(id, zoneId), is(1));
 
         service.onApplicationEvent(new EntityDeletedEvent<>(IdentityZoneHolder.get(), null));
-        assertThat(countClientsInZone(IdentityZoneHolder.get().getId()), is(1));
-        assertThat(countClientApprovals(id), is (1));
+        assertThat(countClientsInZone(zoneId), is(1));
+        assertThat(countClientApprovals(id, zoneId), is (1));
     }
 
     public ClientDetails addClientToDb(String id) {

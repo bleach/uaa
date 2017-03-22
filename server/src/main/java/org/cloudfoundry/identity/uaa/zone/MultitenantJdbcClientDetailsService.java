@@ -93,6 +93,10 @@ public class MultitenantJdbcClientDetailsService implements ClientServicesExtens
     private static final String DELETE_CLIENTS_BY_ZONE = "delete from oauth_client_details where identity_zone_id = ?";
     private static final String DELETE_CLIENT_APPROVALS_BY_ZONE = "delete from authz_approvals where client_id in (select client_id from oauth_client_details where identity_zone_id = ?)"+
         " and user_id in (select id from users where identity_zone_id = ?)";
+
+    private static final String DELETE_CLIENT_APPROVALS = "delete from authz_approvals where client_id = ?"+
+        " and user_id in (select id from users where identity_zone_id = ?)";
+
     private RowMapper<ClientDetails> rowMapper = new ClientDetailsRowMapper();
 
     private String deleteClientDetailsSql = DEFAULT_DELETE_STATEMENT;
@@ -162,14 +166,11 @@ public class MultitenantJdbcClientDetailsService implements ClientServicesExtens
     }
 
     public void removeClientDetails(String clientId) throws NoSuchClientException {
-        int count = jdbcTemplate.update(deleteClientDetailsSql, clientId, IdentityZoneHolder.get().getId());
-        if (count != 1) {
-            throw new NoSuchClientException("No client found with id = " + clientId);
-        }
+        deleteByClient(clientId, IdentityZoneHolder.get().getId());
     }
 
     public List<ClientDetails> listClientDetails() {
-        return listFactory.getList(findClientDetailsSql, Collections.<String, Object> singletonMap("identityZoneId",IdentityZoneHolder.get().getId()), rowMapper);
+        return listFactory.getList(findClientDetailsSql, Collections.singletonMap("identityZoneId",IdentityZoneHolder.get().getId()), rowMapper);
     }
 
     private Object[] getInsertClientDetailsFields(ClientDetails clientDetails) {
@@ -285,6 +286,17 @@ public class MultitenantJdbcClientDetailsService implements ClientServicesExtens
     @Override
     public int deleteByOrigin(String origin, String zoneId) {
         return 0;
+    }
+
+    @Override
+    public int deleteByClient(String clientId, String zoneId) {
+        int count = jdbcTemplate.update(deleteClientDetailsSql, clientId, IdentityZoneHolder.get().getId());
+        if (count == 0) {
+            throw new NoSuchClientException("No client found with id = " + clientId);
+        }
+        int approvalCount = jdbcTemplate.update(DELETE_CLIENT_APPROVALS, clientId, IdentityZoneHolder.get().getId());
+        getLogger().debug(String.format("Deleted client '%s' and %s approvals", clientId, approvalCount));
+        return count;
     }
 
     @Override
