@@ -105,7 +105,7 @@ public abstract class UaaUrlUtils {
         //for example http://localhost:8080/uaa or http://login.identity.cf-app.com
         String requestURL = request.getRequestURL().toString();
         return StringUtils.hasText(request.getServletPath()) ?
-            requestURL.substring(0, requestURL.indexOf(request.getServletPath())) :
+            requestURL.substring(0, requestURL.lastIndexOf(request.getServletPath())) :
             requestURL;
     }
 
